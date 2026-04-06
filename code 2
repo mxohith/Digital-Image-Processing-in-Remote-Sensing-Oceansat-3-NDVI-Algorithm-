@@ -1,0 +1,188 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import os, glob
+from skimage import io
+from skimage.transform import resize
+from scipy.ndimage import median_filter
+from sklearn.cluster import KMeans
+import warnings
+warnings.filterwarnings('ignore')
+
+# ================================
+# SET FOLDER & LOAD FILES
+# ================================
+os.chdir(r'C:\Users\91807')
+
+files = sorted(glob.glob('*.tiff') + glob.glob('*.tif'))
+print("Files detected:")
+for i, f in enumerate(files):
+    print(f"  [{i}] {f}")
+
+BLUE_BAND  = files[0]   # B02
+GREEN_BAND = files[1]   # B03
+RED_BAND   = files[2]   # B04
+NIR_BAND   = files[3]   # B08
+PAN_BAND   = NIR_BAND
+
+print(f"\nBlue  → {BLUE_BAND}")
+print(f"Green → {GREEN_BAND}")
+print(f"Red   → {RED_BAND}")
+print(f"NIR   → {NIR_BAND}")
+
+TARGET_SIZE = (512, 512)
+
+# LOAD
+print("\nLoading bands...")
+blue  = io.imread(BLUE_BAND).astype(np.float32)
+green = io.imread(GREEN_BAND).astype(np.float32)
+red   = io.imread(RED_BAND).astype(np.float32)
+nir   = io.imread(NIR_BAND).astype(np.float32)
+pan   = nir.copy()
+
+# RESIZE
+blue  = resize(blue,  TARGET_SIZE, preserve_range=True).astype(np.float32)
+green = resize(green, TARGET_SIZE, preserve_range=True).astype(np.float32)
+red   = resize(red,   TARGET_SIZE, preserve_range=True).astype(np.float32)
+nir   = resize(nir,   TARGET_SIZE, preserve_range=True).astype(np.float32)
+pan   = resize(pan,   TARGET_SIZE, preserve_range=True).astype(np.float32)
+
+# NORMALIZE
+def safe_normalize(band):
+    band = np.clip(band, 0, None)
+    bmax = np.percentile(band, 98)
+    if bmax == 0:
+        return np.zeros_like(band)
+    return np.clip(band / bmax, 0, 1)
+
+blue  = safe_normalize(blue)
+green = safe_normalize(green)
+red   = safe_normalize(red)
+nir   = safe_normalize(nir)
+pan   = safe_normalize(pan)
+
+# NOISE REMOVAL
+blue  = median_filter(blue,  size=3)
+green = median_filter(green, size=3)
+red   = median_filter(red,   size=3)
+nir   = median_filter(nir,   size=3)
+pan   = median_filter(pan,   size=3)
+
+# RGB DISPLAY
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+ms = np.dstack((red, green, blue))
+ms_display = np.clip(ms * 3.5, 0, 1)
+axes[0].imshow(ms_display)
+axes[0].set_title("True Colour RGB\nBengaluru - Sentinel-2", fontsize=12)
+axes[0].axis('off')
+fc = np.dstack((nir, red, green))
+fc_display = np.clip(fc * 3.0, 0, 1)
+axes[1].imshow(fc_display)
+axes[1].set_title("False Colour\nVegetation = Red", fontsize=12)
+axes[1].axis('off')
+plt.suptitle("Sentinel-2 L2A — Bengaluru", fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.savefig('01_original_bands.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# CLOUD MASK
+brightness = (red + green + blue) / 3
+cloud_mask = brightness > 0.75
+cloud_percent = np.sum(cloud_mask) / cloud_mask.size * 100
+print(f"Cloud coverage: {cloud_percent:.1f}%")
+
+# VEGETATION INDICES
+eps = 1e-10
+NDVI = (nir - red) / (nir + red + eps)
+NDVI = np.clip(NDVI, -1, 1)
+NDVI[cloud_mask] = np.nan
+
+valid_NDVI = NDVI[~np.isnan(NDVI)]
+NDVI_min = np.percentile(valid_NDVI, 5)
+NDVI_max = np.percentile(valid_NDVI, 95)
+VF = (NDVI - NDVI_min) / (NDVI_max - NDVI_min + eps)
+VF = np.clip(VF, 0, 1)
+VF[cloud_mask] = np.nan
+
+L, C1, C2, G = 1.0, 6.0, 7.5, 2.5
+EVI = G * (nir - red) / (nir + C1 * red - C2 * blue + L + eps)
+EVI = np.clip(EVI, -1, 1)
+EVI[cloud_mask] = np.nan
+
+# PLOT INDICES
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+im1 = axes[0].imshow(NDVI, cmap='RdYlGn', vmin=-0.2, vmax=0.8)
+axes[0].set_title("NDVI", fontsize=12)
+axes[0].axis('off')
+plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
+
+im2 = axes[1].imshow(VF, cmap='Greens', vmin=0, vmax=1)
+axes[1].set_title("Vegetation Fraction (VF)", fontsize=12)
+axes[1].axis('off')
+plt.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
+
+im3 = axes[2].imshow(EVI, cmap='RdYlGn', vmin=-0.2, vmax=0.8)
+axes[2].set_title("EVI", fontsize=12)
+axes[2].axis('off')
+plt.colorbar(im3, ax=axes[2], fraction=0.046, pad=0.04)
+
+plt.suptitle("Vegetation Indices — Bengaluru", fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.savefig('03_vegetation_indices.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# SEGMENTATION
+vi_stack = np.dstack((
+    np.nan_to_num(NDVI, nan=0.0),
+    np.nan_to_num(VF,   nan=0.0),
+    np.nan_to_num(EVI,  nan=0.0)
+))
+h, w, c = vi_stack.shape
+pixels = vi_stack.reshape(-1, 3)
+kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
+labels = kmeans.fit_predict(pixels)
+segmented = labels.reshape(h, w).astype(float)
+segmented[cloud_mask] = np.nan
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+axes[0].imshow(ms_display)
+axes[0].set_title("Original RGB", fontsize=12)
+axes[0].axis('off')
+seg = axes[1].imshow(segmented, cmap='RdYlGn', vmin=0, vmax=4)
+axes[1].set_title("Land Cover Segmentation", fontsize=12)
+axes[1].axis('off')
+plt.colorbar(seg, ax=axes[1], fraction=0.046, pad=0.04)
+plt.suptitle("Segmentation — Bengaluru", fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.savefig('05_segmentation.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# NDVI HISTOGRAM
+fig, ax = plt.subplots(figsize=(9, 5))
+valid = NDVI[~np.isnan(NDVI)].flatten()
+ax.hist(valid, bins=100, color='green', alpha=0.7, edgecolor='darkgreen')
+ax.axvline(x=0.2, color='orange', linestyle='--', linewidth=1.5, label='Sparse veg (0.2)')
+ax.axvline(x=0.5, color='red',    linestyle='--', linewidth=1.5, label='Dense veg (0.5)')
+ax.set_xlabel('NDVI Value', fontsize=12)
+ax.set_ylabel('Pixel Count', fontsize=12)
+ax.set_title('NDVI Distribution — Bengaluru', fontsize=13, fontweight='bold')
+ax.legend()
+ax.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('06_ndvi_histogram.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# SUMMARY
+veg_cover   = np.sum(NDVI > 0.2)  / np.sum(~np.isnan(NDVI)) * 100
+urban_cover = np.sum((NDVI > 0.0) & (NDVI <= 0.2)) / np.sum(~np.isnan(NDVI)) * 100
+water_cover = np.sum(NDVI <= 0.0) / np.sum(~np.isnan(NDVI)) * 100
+
+print("\n" + "="*45)
+print("      RESULTS — BENGALURU")
+print("="*45)
+print(f"Cloud coverage   : {cloud_percent:.1f}%")
+print(f"NDVI mean        : {np.nanmean(NDVI):.3f}")
+print(f"Vegetation cover : {veg_cover:.1f}%")
+print(f"Urban/Bare soil  : {urban_cover:.1f}%")
+print(f"Water/Shadow     : {water_cover:.1f}%")
+print("="*45)
+print("\nAll output images saved!")
