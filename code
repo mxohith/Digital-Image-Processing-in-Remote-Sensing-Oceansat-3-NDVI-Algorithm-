@@ -69,32 +69,32 @@ ms_clean = median_filter(ms, size=3)
 # ================================
 # FUSION
 # ================================
-fused = (ms_clean + pan_clean[..., None]) / 2
+pan = pan / np.max(pan)
 
+fused = ms * pan[:, :, None]
+
+# Normalize properly
+fused = fused - np.min(fused)
+fused = fused / np.max(fused)
 plt.imshow(fused)
 plt.title("Fused Image")
 plt.axis('off')
 plt.show()
 
+
 # ================================
 # SEGMENTATION
 # ================================
-# ================================
-# MULTI-LEVEL SEGMENTATION
-# ================================
-gray = rgb2gray(fused)
+from sklearn.cluster import KMeans
 
-# Define multiple thresholds
-t1 = 0.3
-t2 = 0.6
+h, w, c = fused.shape
+pixels = fused.reshape(-1, 3)
 
-segmented = np.zeros_like(gray)
+kmeans = KMeans(n_clusters=4, random_state=0)
+labels = kmeans.fit_predict(pixels)
 
-segmented[gray < t1] = 1
-segmented[(gray >= t1) & (gray < t2)] = 2
-segmented[gray >= t2] = 3
+segmented = labels.reshape(h, w)
 
 plt.imshow(segmented, cmap='jet')
-plt.title("Multi-Level Segmented Image")
+plt.title("Segmented Image")
 plt.axis('off')
-plt.show()
