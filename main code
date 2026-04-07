@@ -8,9 +8,8 @@ from sklearn.cluster import KMeans
 import warnings
 warnings.filterwarnings('ignore')
 
-# ================================
 # SET FOLDER & LOAD FILES
-# ================================
+
 os.chdir(r'C:\Users\91807')
 
 files = sorted(glob.glob('*.tiff') + glob.glob('*.tif'))
